@@ -166,7 +166,11 @@ lint_all_files() {
     while read FILE
     do
         lint_file "$FILE"
-    done < <(find * -type f -name '*.scad' | grep -v ^tests/ | sort)
+    done < <(
+        find * \
+            -path "test-results" -prune \
+            -o \( -type f -name '*.scad' -print \) \
+        | sort )
 }
 
 #-----------------------------------------------------------

@@ -153,6 +153,12 @@ lint_file() {
     do
         lint_error_line "$RAW_FILE" "$LINE_NO" 'Missing blank after ,'
     done < <(grep -n ',[^ ]' "$FILE" || true)
+
+    # Check against trailing space
+    while IFS=: read LINE_NO LINE
+    do
+        lint_error_line "$RAW_FILE" "$LINE_NO" 'Trailing whitespace'
+    done < <(grep -n '[ 	]$' "$FILE" || true)
 }
 
 #-----------------------------------------------------------

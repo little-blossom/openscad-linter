@@ -1,0 +1,189 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+
+#-----------------------------------------------------------
+ERROR_COUNT=0
+
+VERBOSITY=0
+
+FILE=
+
+#-----------------------------------------------------------
+print_help() {
+    cat <<EOF
+$0 [ OPTIONS ]
+
+OPTIONS:
+  --help              -- Prints this page
+  --only-file FILE    -- Only lint file FILE
+  --verbose           -- Increase verbosity
+EOF
+}
+
+#-----------------------------------------------------------
+parse_arguments() {
+    while [ $# -gt 0 ]
+    do
+        local ARGUMENT="$1"
+        shift
+        case "$ARGUMENT" in
+            "--help" )
+                print_help
+                exit 1
+                ;;
+            "--only-file" )
+                [[ $# -gt 0 ]] || error "$ARGUMENT expects a further argument"
+                FILE="$1"
+                shift
+                ;;
+            "--verbose" )
+                VERBOSITY="$((VERBOSITY-10))"
+                ;;
+            * )
+                error "Unknown argument '$ARGUMENT'"
+                ;;
+        esac
+    done
+}
+
+#-----------------------------------------------------------
+log() {
+    local LEVEL="$1"
+    shift
+    echo "$LEVEL" "$@"
+}
+
+#-----------------------------------------------------------
+debug() {
+    if [ "$VERBOSITY" -lt -9 ]
+    then
+        log "DEBUG" "$@"
+    fi
+}
+
+#-----------------------------------------------------------
+info() {
+    log "INFO" "$@"
+}
+
+#-----------------------------------------------------------
+warn() {
+    log "WARN" "$@"
+}
+
+#-----------------------------------------------------------
+error() {
+    log "ERROR" "$@"
+}
+
+#-----------------------------------------------------------
+fatal() {
+    log "FATAL" "$@"
+    exit 1
+}
+
+#-----------------------------------------------------------
+lint_error_line() {
+    local FILE="$1"
+    local LINE_NUMBER="$2"
+    local REASON="$3"
+
+    ERROR_COUNT=$((ERROR_COUNT+1))
+
+    local MSG="Linting error in $FILE"
+    if [ -n "$LINE_NUMBER" ]
+    then
+        MSG+=" line $LINE_NUMBER"
+    fi
+    MSG+=": $REASON"
+
+    error "$MSG"
+}
+
+#-----------------------------------------------------------
+lint_error() {
+    local FILE="$1"
+    local REASON="$2"
+
+    lint_error_line "$FILE" "" "$REASON"
+}
+
+#-----------------------------------------------------------
+lint_file() {
+    local RAW_FILE="$1"
+
+    local EXPECTED_MODULE_NAME="$(basename "$FILE" '.scad')"
+    local FOUND_EXPECTED_MODULE=no
+    local FOUND_TESTS=0
+
+    info "Linting '$RAW_FILE' ..."
+
+    # Check for expected module
+    while IFS=: read LINE_NO LINE
+    do
+        MODULE="${LINE#module }"
+        MODULE="${MODULE%%(*}"
+
+        if [ "$MODULE" = "$EXPECTED_MODULE_NAME" ]
+        then
+            FOUND_EXPECTED_MODULE=yes
+        else
+            if [ "${MODULE:0:4}" = 'test' ]
+            then
+                FOUND_TESTS=$((FOUND_TESTS+1))
+            else
+                lint_error_line "$RAW_FILE" "$LINE_NO" "Module '$MODULE' neither matches file name nor is a test"
+            fi
+        fi
+    done < <(grep -n '^module' "$FILE" || true)
+
+    # Check against untested files
+    if [ "$FOUND_TESTS" = '0' ]
+    then
+        if [ "$FOUND_EXPECTED_MODULE" = "yes" ]
+        then
+            lint_error "$RAW_FILE" "No tests in file"
+        fi
+    fi
+
+    # Check for space after comma
+    while IFS=: read LINE_NO LINE
+    do
+        lint_error_line "$RAW_FILE" "$LINE_NO" 'Missing blank after ,'
+    done < <(grep -n ',[^ ]' "$FILE" || true)
+}
+
+#-----------------------------------------------------------
+lint_all_files() {
+    while read FILE
+    do
+        lint_file "$FILE"
+    done < <(find * -type f -name '*.scad' | grep -v ^tests/ | sort)
+}
+
+#-----------------------------------------------------------
+parse_arguments "$@"
+
+if [ -n "$FILE" ]
+then
+    lint_file "$FILE"
+else
+    lint_all_files
+fi
+
+cat <<EOF
+
+------------------------------------------------------------------------
+
+Linter errors: $ERROR_COUNT
+
+EOF
+
+if [ "$ERROR_COUNT" -ne 0 ]
+then
+    fatal "There were $ERROR_COUNT linting errors."
+else
+    info "No linting errors."
+fi

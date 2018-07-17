@@ -1,199 +1,151 @@
-#!/bin/bash
+#!/usr/bin/env python
 
-set -e
-set -o pipefail
+import argparse
+import sys
+import logging
+import os
+import re
 
-#-----------------------------------------------------------
-ERROR_COUNT=0
+LOG_MESSAGE_FORMAT_PLAIN = "%(message)s"
+LOG_MESSAGE_FORMAT_VERBOSE = "%(asctime)s.%(msecs)03d %(levelname)-5s \
+[%(threadName)s] %(filename)s:%(lineno)d - %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
-VERBOSITY=0
 
-FILE=
+NAG_COUNT = 0
 
-#-----------------------------------------------------------
-print_help() {
-    cat <<EOF
-$0 [ OPTIONS ]
 
-OPTIONS:
-  --help              -- Prints this page
-  --only-file FILE    -- Only lint file FILE
-  --verbose           -- Increase verbosity
-EOF
-}
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--only-file', metavar='FILE',
+                        help='Only lint FILE instead of all *.scad ' +
+                        'files')
+    parser.add_argument('-v', '--verbose',
+                        action='count', default=0,
+                        help='Increase verbosity of output')
+    return parser.parse_args()
 
-#-----------------------------------------------------------
-parse_arguments() {
-    while [ $# -gt 0 ]
-    do
-        local ARGUMENT="$1"
-        shift
-        case "$ARGUMENT" in
-            "--help" )
-                print_help
-                exit 1
-                ;;
-            "--only-file" )
-                [[ $# -gt 0 ]] || error "$ARGUMENT expects a further argument"
-                FILE="$1"
-                shift
-                ;;
-            "--verbose" )
-                VERBOSITY="$((VERBOSITY-10))"
-                ;;
-            * )
-                error "Unknown argument '$ARGUMENT'"
-                ;;
-        esac
-    done
-}
 
-#-----------------------------------------------------------
-log() {
-    local LEVEL="$1"
-    shift
-    echo "$LEVEL" "$@"
-}
+def setup_logging(verbosity=0, log_file=None):
+    log_level_map = {
+        1: logging.WARNING,
+        2: logging.INFO,
+        3: logging.DEBUG,
+        }
+    log_level = log_level_map.get(min(verbosity, 3), logging.ERROR)
+    if log_level <= logging.INFO:
+        message_format = LOG_MESSAGE_FORMAT_VERBOSE
+    else:
+        message_format = LOG_MESSAGE_FORMAT_PLAIN
 
-#-----------------------------------------------------------
-debug() {
-    if [ "$VERBOSITY" -lt -9 ]
-    then
-        log "DEBUG" "$@"
-    fi
-}
+    if log_file:
+        log_file_abs = os.path.abspath(log_file)
 
-#-----------------------------------------------------------
-info() {
-    log "INFO" "$@"
-}
+        # Make sure log file's directory exists
+        if not os.path.exists(os.path.dirname(log_file_abs)):
+            os.makedirs(os.path.dirname(log_file_abs))
 
-#-----------------------------------------------------------
-warn() {
-    log "WARN" "$@"
-}
+        # Root logger at DEBUG, so we get all logs into the log file
+        logging.basicConfig(level=logging.DEBUG,
+                            format=message_format,
+                            datefmt=LOG_DATE_FORMAT,
+                            filename=log_file_abs)
+        # Console logger at user specified verbosity
+        console_logger = logging.StreamHandler()
+        console_logger.setLevel(log_level)
+        console_logger.setFormatter(logging.Formatter(message_format))
+        logging.getLogger('').addHandler(console_logger)
+        logging.debug('Logging to "%s"' % (log_file))
+    else:
+        logging.basicConfig(level=log_level,
+                            format=message_format,
+                            datefmt=LOG_DATE_FORMAT)
 
-#-----------------------------------------------------------
-error() {
-    log "ERROR" "$@"
-}
 
-#-----------------------------------------------------------
-fatal() {
-    log "FATAL" "$@"
-    exit 1
-}
+def nag(code, msg, file_name, line='', col=''):
+    global NAG_COUNT
+    logging.error('%s:%s:%s: %s %s' % (file_name, line, col, code, msg))
+    NAG_COUNT = NAG_COUNT+1
 
-#-----------------------------------------------------------
-lint_error_line() {
-    local FILE="$1"
-    local LINE_NUMBER="$2"
-    local REASON="$3"
 
-    ERROR_COUNT=$((ERROR_COUNT+1))
+def get_expected_module_name(file_name):
+    ret = os.path.basename(file_name)
+    if ret.endswith('.scad'):
+        ret = ret[:-5]
+    ret = re.sub('_([a-z])', lambda p: p.group(1).upper(), ret)
+    return ret
 
-    local MSG="Linting error in $FILE"
-    if [ -n "$LINE_NUMBER" ]
-    then
-        MSG+=" line $LINE_NUMBER"
-    fi
-    MSG+=": $REASON"
 
-    error "$MSG"
-}
+def lint_file(file_name):
+    logging.debug('Linting file %s' % (file_name))
 
-#-----------------------------------------------------------
-lint_error() {
-    local FILE="$1"
-    local REASON="$2"
+    expected_module_name = get_expected_module_name(file_name)
+    has_expected_module = False
+    has_tests = False
 
-    lint_error_line "$FILE" "" "$REASON"
-}
+    with open(file_name, 'r') as f:
+        line_number = 0
+        for line in f:
+            if line.endswith('\n'):
+                line = line[:-1]
+            logging.debug('Linting line %s' % (line))
+            line_number += 1
+            if line.startswith('module '):
+                split = line[7:].split('(', 1)
+                if len(split) == 2:
+                    module_name = split[0]
+                    if module_name == expected_module_name:
+                        if has_expected_module:
+                            nag('U007', 'module \'%s\' has already been \
+defined' % (module_name), file_name, line_number, 7)
+                        else:
+                            has_expected_module = True
+                    elif module_name.startswith("test"):
+                        has_tests = True
+                    else:
+                        nag('U004', 'module \'%s\' neither expected nor test \
+module' % (module_name), file_name, line_number, 7)
+                else:
+                    nag('U001', 'module definition without \'(\' on same line',
+                        file_name, line_number, 7)
 
-#-----------------------------------------------------------
-lint_file() {
-    local RAW_FILE="$1"
+            match = re.search(',[^ ]', line)
+            if match:
+                nag('U005', 'missing space after comma', file_name,
+                    line_number, match.start())
 
-    local EXPECTED_MODULE_NAME="$(basename "$FILE" '.scad')"
-    local FOUND_EXPECTED_MODULE=no
-    local FOUND_TESTS=0
+            match = re.search('[ 	]$', line)
+            if match:
+                nag('U006', 'trailing whitespace', file_name,
+                    line_number, match.start())
 
-    info "Linting '$RAW_FILE' ..."
+    if has_expected_module and not has_tests:
+            nag('U003', 'module \'%s\' does not have tests\
+' % (expected_module_name), file_name)
 
-    # Check for expected module
-    while IFS=: read LINE_NO LINE
-    do
-        MODULE="${LINE#module }"
-        MODULE="${MODULE%%(*}"
 
-        if [ "$MODULE" = "$EXPECTED_MODULE_NAME" ]
-        then
-            FOUND_EXPECTED_MODULE=yes
-        else
-            if [ "${MODULE:0:4}" = 'test' ]
-            then
-                FOUND_TESTS=$((FOUND_TESTS+1))
-            else
-                lint_error_line "$RAW_FILE" "$LINE_NO" "Module '$MODULE' neither matches file name nor is a test"
-            fi
-        fi
-    done < <(grep -n '^module' "$FILE" || true)
+def lint_files(f=None):
+    if f:
+        lint_file(f)
+    else:
+        for root, dirs, files in os.walk(os.getcwd()):
+            for omitted in ['fixtures', 'test-results']:
+                if omitted in dirs:
+                    dirs.remove(omitted)
+            for f in files:
+                if f.endswith('.scad'):
+                    lint_file(os.path.join(root, f))
 
-    # Check against untested files
-    if [ "$FOUND_TESTS" = '0' ]
-    then
-        if [ "$FOUND_EXPECTED_MODULE" = "yes" ]
-        then
-            lint_error "$RAW_FILE" "No tests in file"
-        fi
-    fi
 
-    # Check for space after comma
-    while IFS=: read LINE_NO LINE
-    do
-        lint_error_line "$RAW_FILE" "$LINE_NO" 'Missing blank after ,'
-    done < <(grep -n ',[^ ]' "$FILE" || true)
+def main():
+    args = parse_args()
 
-    # Check against trailing space
-    while IFS=: read LINE_NO LINE
-    do
-        lint_error_line "$RAW_FILE" "$LINE_NO" 'Trailing whitespace'
-    done < <(grep -n '[ 	]$' "$FILE" || true)
-}
+    setup_logging(args.verbose)
 
-#-----------------------------------------------------------
-lint_all_files() {
-    while read FILE
-    do
-        lint_file "$FILE"
-    done < <(
-        find * \
-            -path "test-results" -prune \
-            -o \( -type f -name '*.scad' -print \) \
-        | sort )
-}
+    lint_files(args.only_file)
 
-#-----------------------------------------------------------
-parse_arguments "$@"
+    sys.exit(NAG_COUNT > 0)
 
-if [ -n "$FILE" ]
-then
-    lint_file "$FILE"
-else
-    lint_all_files
-fi
 
-cat <<EOF
-
-------------------------------------------------------------------------
-
-Linter errors: $ERROR_COUNT
-
-EOF
-
-if [ "$ERROR_COUNT" -ne 0 ]
-then
-    fatal "There were $ERROR_COUNT linting errors."
-else
-    info "No linting errors."
-fi
+if __name__ == "__main__":
+    main()

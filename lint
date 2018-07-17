@@ -4,7 +4,7 @@ import argparse
 import sys
 import logging
 import os
-import re
+from openscad_linter import OpenscadLinter, OpenscadRecursiveLinter
 
 LOG_MESSAGE_FORMAT_PLAIN = "%(message)s"
 LOG_MESSAGE_FORMAT_VERBOSE = "%(asctime)s.%(msecs)03d %(levelname)-5s \
@@ -17,7 +17,7 @@ NAG_COUNT = 0
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--only-file', metavar='FILE',
+    parser.add_argument('--only-file', metavar='FILE', default=os.getcwd(),
                         help='Only lint FILE instead of all *.scad ' +
                         'files')
     parser.add_argument('-v', '--verbose',
@@ -68,81 +68,15 @@ def nag(code, msg, file_name, line='', col=''):
     NAG_COUNT = NAG_COUNT+1
 
 
-def get_expected_module_name(file_name):
-    ret = os.path.basename(file_name)
-    if ret.endswith('.scad'):
-        ret = ret[:-5]
-    ret = re.sub('_([a-z])', lambda p: p.group(1).upper(), ret)
-    return ret
-
-
-def lint_file(file_name):
-    logging.debug('Linting file %s' % (file_name))
-
-    expected_module_name = get_expected_module_name(file_name)
-    has_expected_module = False
-    has_tests = False
-
-    with open(file_name, 'r') as f:
-        line_number = 0
-        for line in f:
-            if line.endswith('\n'):
-                line = line[:-1]
-            logging.debug('Linting line %s' % (line))
-            line_number += 1
-            if line.startswith('module '):
-                split = line[7:].split('(', 1)
-                if len(split) == 2:
-                    module_name = split[0]
-                    if module_name == expected_module_name:
-                        if has_expected_module:
-                            nag('U007', 'module \'%s\' has already been \
-defined' % (module_name), file_name, line_number, 7)
-                        else:
-                            has_expected_module = True
-                    elif module_name.startswith("test"):
-                        has_tests = True
-                    else:
-                        nag('U004', 'module \'%s\' neither expected nor test \
-module' % (module_name), file_name, line_number, 7)
-                else:
-                    nag('U001', 'module definition without \'(\' on same line',
-                        file_name, line_number, 7)
-
-            match = re.search(',[^ ]', line)
-            if match:
-                nag('U005', 'missing space after comma', file_name,
-                    line_number, match.start())
-
-            match = re.search('[ 	]$', line)
-            if match:
-                nag('U006', 'trailing whitespace', file_name,
-                    line_number, match.start())
-
-    if has_expected_module and not has_tests:
-            nag('U003', 'module \'%s\' does not have tests\
-' % (expected_module_name), file_name)
-
-
-def lint_files(f=None):
-    if f:
-        lint_file(f)
-    else:
-        for root, dirs, files in os.walk(os.getcwd()):
-            for omitted in ['fixtures', 'test-results']:
-                if omitted in dirs:
-                    dirs.remove(omitted)
-            for f in files:
-                if f.endswith('.scad'):
-                    lint_file(os.path.join(root, f))
-
-
 def main():
     args = parse_args()
 
     setup_logging(args.verbose)
 
-    lint_files(args.only_file)
+    base_linter = OpenscadLinter(nag)
+    linter = OpenscadRecursiveLinter(base_linter)
+
+    linter.lint_files(args.only_file)
 
     sys.exit(NAG_COUNT > 0)
 

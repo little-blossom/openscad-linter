@@ -18,8 +18,8 @@ class TestScaffolding(LinterTestCase):
         return file_abs
 
     def assert_linted_files(self, linter, expected):
-        print linter
-        print linter.lint_file
+        print(linter)
+        print(linter.lint_file)
         calls = linter.lint_file.call_args_list
         actual = sorted([c[0][0] for c in calls])
 
@@ -64,7 +64,7 @@ class TestScaffolding(LinterTestCase):
             abs_file_name = self.touch(tmpdir, file_name)
             if file_name != ['bar.txt']:
                 expected += [abs_file_name]
-        print expected
+        print(expected)
         expected.sort()
         linter = Mock()
 
